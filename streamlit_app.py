@@ -1,4 +1,4 @@
-# streamlit_app.py
+# streamlit_app_v4.1.py
 import streamlit as st
 import binascii
 import time
@@ -138,12 +138,12 @@ def apply_patches_pure_python_search(
              if p_ctx_a: patterns_to_try.append((p_ctx_a, pri, 0, "Old+CtxAfter")); pri+=1
         if strictness_level <= 4:
              if p_old: patterns_to_try.append((p_old, pri, 0, "Old Data Only")); pri+=1
-        for pattern_bytes, priority, ctx_b_len, desc in patterns_to_try:
-            if not pattern_bytes: continue
-            pattern_info = {"pattern": pattern_bytes, "priority": priority, "ctx_b_len": ctx_b_len, "desc": desc}
-            patch_details_list_this_pass[i]["patterns"].append(pattern_info); unique_patterns.add(pattern_bytes)
-            if pattern_bytes not in pattern_to_local_patch_indices: pattern_to_local_patch_indices[pattern_bytes] = []
-            if i not in pattern_to_local_patch_indices[pattern_bytes]: pattern_to_local_patch_indices[pattern_bytes].append(i)
+        for pattern_bytes_loop, priority, ctx_b_len, desc in patterns_to_try:
+            if not pattern_bytes_loop: continue
+            pattern_info = {"pattern": pattern_bytes_loop, "priority": priority, "ctx_b_len": ctx_b_len, "desc": desc}
+            patch_details_list_this_pass[i]["patterns"].append(pattern_info); unique_patterns.add(pattern_bytes_loop)
+            if pattern_bytes_loop not in pattern_to_local_patch_indices: pattern_to_local_patch_indices[pattern_bytes_loop] = []
+            if i not in pattern_to_local_patch_indices[pattern_bytes_loop]: pattern_to_local_patch_indices[pattern_bytes_loop].append(i)
     patterns_list = list(unique_patterns); build_end_time = time.time()
     current_progress_after_build = progress_start_percent + (progress_scan_end_percent - progress_start_percent) * 0.05
     post_update('progress', int(current_progress_after_build))
@@ -163,12 +163,12 @@ def apply_patches_pure_python_search(
         if scan_count > 0 and scan_count % 250000 == 0:
             sp_done = (i_scan / target_len) if target_len > 0 else 1; cs_prog = current_progress_after_build + (scan_progress_range * sp_done)
             post_update('progress', int(cs_prog)); post_status_update(f"Scanning target at offset {i_scan}/{target_len}...")
-        for pattern_bytes in patterns_list:
-             pattern_len = len(pattern_bytes)
-             if i_scan + pattern_len <= target_len and target_file_bytes_input[i_scan : i_scan + pattern_len] == pattern_bytes:
-                 matched_local_indices = pattern_to_local_patch_indices.get(pattern_bytes, [])
+        for pattern_bytes_loop_2 in patterns_list:
+             pattern_len = len(pattern_bytes_loop_2)
+             if i_scan + pattern_len <= target_len and target_file_bytes_input[i_scan : i_scan + pattern_len] == pattern_bytes_loop_2:
+                 matched_local_indices = pattern_to_local_patch_indices.get(pattern_bytes_loop_2, [])
                  for local_idx in matched_local_indices:
-                     p_info = next((p for p in patch_details_list_this_pass[local_idx]["patterns"] if p["pattern"] == pattern_bytes), None)
+                     p_info = next((p for p in patch_details_list_this_pass[local_idx]["patterns"] if p["pattern"] == pattern_bytes_loop_2), None)
                      if p_info:
                          m_info = {"start_index_in_target": i_scan, **p_info}
                          if local_idx not in found_matches_local: found_matches_local[local_idx] = []
@@ -263,7 +263,7 @@ def apply_patches_pure_python_search(
     post_status_update(f"Application stage done in {apply_end_time - apply_start_time:.2f}s. Applied {applied_count}. Skipped {len(skipped_details_list)} in this pass.")
     return final_modified_bytes, applied_count, skipped_details_list, applied_orig_indices
 
-# --- Patching Orchestrator ---
+# --- Patching Orchestrator (V4.1 Modification for Skip Log) ---
 def apply_patches_with_multiple_passes(original_file3_bytes, all_diff_blocks_initial, initial_strictness, gui_queue):
     def post_orchestrator_update(message_type, value): gui_queue.put((message_type, value))
     def post_orchestrator_status(message):
@@ -273,7 +273,7 @@ def apply_patches_with_multiple_passes(original_file3_bytes, all_diff_blocks_ini
         post_orchestrator_status("No differences to apply.")
         post_orchestrator_update('progress', 100)
         gui_queue.put(None)
-        return original_file3_bytes, []
+        return original_file3_bytes, [], None # final_bytes, original_diffs_for_audit, bytes_after_pass1_for_audit
 
     all_diff_blocks_augmented = []
     for i, block in enumerate(all_diff_blocks_initial):
@@ -281,6 +281,7 @@ def apply_patches_with_multiple_passes(original_file3_bytes, all_diff_blocks_ini
         all_diff_blocks_augmented.append(augmented_block)
 
     current_target_bytes = original_file3_bytes
+    bytes_after_pass1_for_audit = None # V4.1: For Pass 1 specific audit
     p1_skipped_map = {}; p1_applied_indices = set()
     P1_START, P1_SCAN_END, P1_RESOLVE_END, P1_APPLY_END = 0, 40, 60, 70
     P3_START, P3_APPLY_END = 70, 100
@@ -291,8 +292,12 @@ def apply_patches_with_multiple_passes(original_file3_bytes, all_diff_blocks_ini
         apply_patches_pure_python_search(
             current_target_bytes, all_diff_blocks_augmented, gui_queue, initial_strictness, "Pass 1",
             P1_START, P1_SCAN_END, P1_RESOLVE_END, P1_APPLY_END)
+    
+    bytes_after_pass1_for_audit = modified_bytes_p1 if modified_bytes_p1 is not None else current_target_bytes # V4.1 Capture this state
+    
     p1_applied_indices.update(applied_indices_p1_run)
     current_target_bytes = modified_bytes_p1 if modified_bytes_p1 is not None else current_target_bytes
+    
     for skip_info in skipped_details_p1:
         if skip_info["original_patch_index"] not in p1_applied_indices:
              p1_skipped_map[skip_info["original_patch_index"]] = skip_info
@@ -328,74 +333,78 @@ def apply_patches_with_multiple_passes(original_file3_bytes, all_diff_blocks_ini
                     if current_byte_in_target == expected_old_byte and current_byte_in_target != intended_new_byte:
                         try: target_bytearray_p3[current_byte_original_f1_offset : current_byte_original_f1_offset+1] = intended_new_byte
                         except Exception as e: post_orchestrator_status(f"P3 Byte ERROR applying at 0x{current_byte_original_f1_offset:08X}: {e}")
-        current_target_bytes = bytes(target_bytearray_p3)
+        current_target_bytes = bytes(target_bytearray_p3) # This is the final state after Pass 3
         pass3_end_time = time.time()
         post_orchestrator_status(f"Pass 3 finished in {pass3_end_time - pass3_start_time:.2f}s.")
     else: post_orchestrator_status("No P1-skipped patches for Pass 3 attempt.")
+    
     post_orchestrator_update('progress', P3_APPLY_END)
-    post_orchestrator_status(f"All patching passes complete. Final audit for skip log will occur next.")
+    # The message "Final audit ... will occur next" refers to the audit based on bytes_after_pass1_for_audit
+    post_orchestrator_status(f"All patching passes complete. Generating Pass 1 audit for skip log.")
     gui_queue.put(None)
-    return current_target_bytes, all_diff_blocks_augmented
+    # V4.1: Return final bytes (after all passes), original diffs, AND bytes after pass 1 for audit
+    return current_target_bytes, all_diff_blocks_augmented, bytes_after_pass1_for_audit
 
-# --- Byte-Level Skip Report Generator ---
-def generate_byte_level_skip_report(original_diff_blocks, final_patched_bytes, file2_bytes):
+# --- Byte-Level Skip Report Generator (V4.1: Name changed to reflect its purpose) ---
+def generate_pass1_skip_report(original_diff_blocks, bytes_after_pass1, file2_bytes):
     byte_level_skips = []
-    len_final_patched = len(final_patched_bytes)
+    len_bytes_after_pass1 = len(bytes_after_pass1)
+
     for diff_block in original_diff_blocks:
         patch_num = diff_block["patch_num_original"]
         new_data_from_f2 = diff_block["new_data_bytes"]
-        base_offset_in_final = diff_block["original_offset"]
+        base_offset_in_final = diff_block["original_offset"] # This is original F1 offset
+        
         for i, expected_byte_from_f2 in enumerate(new_data_from_f2):
             expected_target_offset = base_offset_in_final + i
-            if expected_target_offset < len_final_patched:
-                actual_byte_in_final = final_patched_bytes[expected_target_offset]
-                if actual_byte_in_final != expected_byte_from_f2:
+            if expected_target_offset < len_bytes_after_pass1:
+                actual_byte_in_pass1_state = bytes_after_pass1[expected_target_offset]
+                if actual_byte_in_pass1_state != expected_byte_from_f2:
                     byte_level_skips.append({
-                        "patch_number": patch_num, "absolute_offset_in_final": expected_target_offset,
-                        "expected_byte_f2": expected_byte_from_f2, "actual_byte_final": actual_byte_in_final,
-                        "reason": "Byte mismatch after all passes."})
+                        "patch_number": patch_num, "absolute_offset_in_final": expected_target_offset, # "in_final" here refers to expected location
+                        "expected_byte_f2": expected_byte_from_f2, "actual_byte_final": actual_byte_in_pass1_state,
+                        "reason": "Byte mismatch after Pass 1." # V4.1 Reason
+                    })
             else:
                 byte_level_skips.append({
                     "patch_number": patch_num, "absolute_offset_in_final": expected_target_offset,
                     "expected_byte_f2": expected_byte_from_f2, "actual_byte_final": None,
-                    "reason": "Expected byte location is beyond end of final patched file."})
+                    "reason": "Expected byte location (from F1 offset) is beyond end of file after Pass 1." # V4.1 Reason
+                })
     return byte_level_skips
 
 # --- Streamlit UI ---
 st.set_page_config(layout="wide")
-st.title("Binary File Patcher V4 (Streamlit Edition)")
-st.markdown("Compares File 1 & 2, applies differences to File 3, and generates a byte-level audit log.")
-
-# Initialize session state (once per session)
-# Store previous file IDs to detect new uploads
-if 'prev_file1_id' not in st.session_state: st.session_state.prev_file1_id = None
-if 'prev_file2_id' not in st.session_state: st.session_state.prev_file2_id = None
-if 'prev_file3_id' not in st.session_state: st.session_state.prev_file3_id = None
+st.title("Binary File Patcher V4.1 (Streamlit Edition)")
+st.markdown("Compares File 1 & 2, applies differences to File 3. Skip log reflects Pass 1 results.")
 
 default_file_name_map = {
     "file1_name": "File1_Original", "file2_name": "File2_Modified", "file3_name": "File3_Target"
 }
 for key, default_value in default_file_name_map.items():
     if key not in st.session_state: st.session_state[key] = default_value
+if 'prev_file1_id' not in st.session_state: st.session_state.prev_file1_id = None
+if 'prev_file2_id' not in st.session_state: st.session_state.prev_file2_id = None
+if 'prev_file3_id' not in st.session_state: st.session_state.prev_file3_id = None
 if 'file1_bytes' not in st.session_state: st.session_state.file1_bytes = None
 if 'file2_bytes' not in st.session_state: st.session_state.file2_bytes = None
 if 'original_file3_bytes' not in st.session_state: st.session_state.original_file3_bytes = None
 if 'diff_blocks' not in st.session_state: st.session_state.diff_blocks = []
 if 'diff_count' not in st.session_state: st.session_state.diff_count = 0
-if 'patched_file_bytes' not in st.session_state: st.session_state.patched_file_bytes = None
-if 'byte_level_skips_report' not in st.session_state: st.session_state.byte_level_skips_report = []
+if 'final_patched_file_bytes' not in st.session_state: st.session_state.final_patched_file_bytes = None # V4.1 Name change
+if 'pass1_skip_report_data' not in st.session_state: st.session_state.pass1_skip_report_data = [] # V4.1 Name change
 if 'last_run_summary' not in st.session_state: st.session_state.last_run_summary = {}
 if 'live_log_messages' not in st.session_state: st.session_state.live_log_messages = []
 
 col1, col2, col3 = st.columns(3)
-file_upload_keys = {"file1": "uploader_f1", "file2": "uploader_f2", "file3": "uploader_f3"}
+file_upload_keys = {"file1": "uploader_f1_v41", "file2": "uploader_f2_v41", "file3": "uploader_f3_v41"} # Ensure keys are unique if running multiple versions
 
-def reset_dependent_states():
+def reset_dependent_states_v41():
     st.session_state.diff_blocks, st.session_state.diff_count = [], 0
-    st.session_state.patched_file_bytes, st.session_state.byte_level_skips_report = None, []
+    st.session_state.final_patched_file_bytes = None # V4.1
+    st.session_state.pass1_skip_report_data = [] # V4.1
     st.session_state.last_run_summary = {}
     st.session_state.live_log_messages = []
-
 
 with col1:
     st.header("File 1 (Original)")
@@ -406,7 +415,7 @@ with col1:
         st.session_state.file1_name = uploaded_file1.name
         st.session_state.prev_file1_id = uploaded_file1.file_id
         if st.session_state.file1_bytes: st.success(f"Loaded: {st.session_state.file1_name} ({len(st.session_state.file1_bytes)} bytes)")
-        if new_upload: reset_dependent_states()
+        if new_upload: reset_dependent_states_v41()
 with col2:
     st.header("File 2 (Modified)")
     uploaded_file2 = st.file_uploader("Upload Modified File", key=file_upload_keys["file2"])
@@ -416,7 +425,7 @@ with col2:
         st.session_state.file2_name = uploaded_file2.name
         st.session_state.prev_file2_id = uploaded_file2.file_id
         if st.session_state.file2_bytes: st.success(f"Loaded: {st.session_state.file2_name} ({len(st.session_state.file2_bytes)} bytes)")
-        if new_upload: reset_dependent_states()
+        if new_upload: reset_dependent_states_v41()
 with col3:
     st.header("File 3 (Target to Patch)")
     uploaded_file3 = st.file_uploader("Upload Target File", key=file_upload_keys["file3"])
@@ -426,7 +435,7 @@ with col3:
         st.session_state.file3_name = uploaded_file3.name
         st.session_state.prev_file3_id = uploaded_file3.file_id
         if st.session_state.original_file3_bytes: st.success(f"Loaded: {st.session_state.file3_name} ({len(st.session_state.original_file3_bytes)} bytes)")
-        if new_upload: reset_dependent_states() # Only reset results if File 3 itself is new
+        if new_upload: reset_dependent_states_v41()
 
 if st.session_state.file1_bytes and st.session_state.file2_bytes and not st.session_state.diff_blocks:
     with st.spinner("Calculating differences..."):
@@ -442,17 +451,16 @@ if st.session_state.file1_bytes and st.session_state.file2_bytes:
 st.divider()
 
 st.header("Patching Controls")
-strictness_level = st.slider("Pass 1 Strictness", 1, 6, 4, key="strictness_slider_main")
+strictness_level = st.slider("Pass 1 Strictness", 1, 6, 4, key="strictness_slider_main_v41")
 patch_status_placeholder = st.empty()
 patch_progress_placeholder = st.empty()
-st.text_area("Live Log:", "\n".join(st.session_state.live_log_messages), height=200, key="live_log_display_main", disabled=True)
+st.text_area("Live Log:", "\n".join(st.session_state.live_log_messages), height=200, key="live_log_display_main_v41", disabled=True)
 
-if st.button("Apply Differences to File 3", key="apply_button_main", type="primary"):
+if st.button("Apply Differences to File 3", key="apply_button_main_v41", type="primary"):
     patch_status_placeholder.info("Initiating patching...")
     patch_progress_placeholder.progress(0)
-    # Reset results specifically for this run
-    st.session_state.patched_file_bytes = None
-    st.session_state.byte_level_skips_report = []
+    st.session_state.final_patched_file_bytes = None # V4.1
+    st.session_state.pass1_skip_report_data = [] # V4.1
     st.session_state.last_run_summary = {}
     st.session_state.live_log_messages = ["Log started for current run..."]
 
@@ -466,105 +474,142 @@ if st.button("Apply Differences to File 3", key="apply_button_main", type="prima
         else: patch_status_placeholder.info(f"{len(st.session_state.diff_blocks)} diff blocks found. Proceeding.")
     elif not st.session_state.diff_blocks and st.session_state.diff_count == 0:
         patch_status_placeholder.success("Files 1 and 2 are identical. No patches to apply.")
-        st.session_state.patched_file_bytes = st.session_state.original_file3_bytes
+        st.session_state.final_patched_file_bytes = st.session_state.original_file3_bytes # V4.1
         patch_progress_placeholder.progress(100)
     else:
         start_patch_time = time.time()
         streamlit_updater = StreamlitGuiUpdate(patch_progress_placeholder, patch_status_placeholder)
 
         with st.spinner(f"Applying {len(st.session_state.diff_blocks)} diff blocks... This may take some time."):
-            final_bytes_result, all_original_diffs_for_audit = apply_patches_with_multiple_passes(
-                st.session_state.original_file3_bytes, st.session_state.diff_blocks,
-                strictness_level, streamlit_updater)
+            # V4.1: Orchestrator now returns bytes_after_pass1_for_audit
+            final_bytes_after_all_passes, all_original_diffs_for_audit, bytes_after_pass1_for_audit = \
+                apply_patches_with_multiple_passes(
+                    st.session_state.original_file3_bytes, st.session_state.diff_blocks,
+                    strictness_level, streamlit_updater)
             
-            st.session_state.patched_file_bytes = final_bytes_result
-            if final_bytes_result and st.session_state.file2_bytes and all_original_diffs_for_audit:
-                patch_status_placeholder.info("Generating byte-level skip report (audit)...")
-                patch_progress_placeholder.progress(95)
-                st.session_state.byte_level_skips_report = generate_byte_level_skip_report(
-                    all_original_diffs_for_audit, final_bytes_result, st.session_state.file2_bytes)
-            else: st.session_state.byte_level_skips_report = []
+            st.session_state.final_patched_file_bytes = final_bytes_after_all_passes # V4.1 Store the true final bytes
+            
+            # V4.1: Generate skip report based on bytes_after_pass1_for_audit
+            if bytes_after_pass1_for_audit is not None and \
+               st.session_state.file2_bytes is not None and \
+               all_original_diffs_for_audit:
+                patch_status_placeholder.info("Generating Pass 1 based skip report (audit)...")
+                patch_progress_placeholder.progress(95) # Progress before audit
+                st.session_state.pass1_skip_report_data = generate_pass1_skip_report( # V4.1
+                    all_original_diffs_for_audit, bytes_after_pass1_for_audit, st.session_state.file2_bytes
+                )
+            else: 
+                st.session_state.pass1_skip_report_data = []
         
         total_patch_time = time.time() - start_patch_time
         patch_progress_placeholder.progress(100)
 
         total_original_diff_bytes_f2 = sum(len(d["new_data_bytes"]) for d in all_original_diffs_for_audit) if all_original_diffs_for_audit else 0
-        final_skipped_count_audit = len(st.session_state.byte_level_skips_report)
-        successfully_matched_bytes_audit = total_original_diff_bytes_f2 - final_skipped_count_audit
-        total_byte_diff_vs_f3_orig = "N/A"
-        if st.session_state.original_file3_bytes and st.session_state.patched_file_bytes:
-            total_byte_diff_vs_f3_orig = count_byte_differences(st.session_state.original_file3_bytes, st.session_state.patched_file_bytes)
+        pass1_audit_mismatch_count = len(st.session_state.pass1_skip_report_data) # V4.1
+        successfully_matched_bytes_pass1_audit = total_original_diff_bytes_f2 - pass1_audit_mismatch_count # V4.1
+        
+        total_byte_diff_vs_f3_orig = "N/A" # This is vs the FINAL patched file
+        if st.session_state.original_file3_bytes and st.session_state.final_patched_file_bytes:
+            total_byte_diff_vs_f3_orig = count_byte_differences(st.session_state.original_file3_bytes, st.session_state.final_patched_file_bytes)
+        
         st.session_state.last_run_summary = {
-            "total_patch_time": total_patch_time, "total_original_diff_bytes_f2": total_original_diff_bytes_f2,
-            "final_skipped_count_audit": final_skipped_count_audit, "successfully_matched_bytes_audit": successfully_matched_bytes_audit,
-            "total_byte_diff_vs_f3_orig": total_byte_diff_vs_f3_orig}
-        if st.session_state.patched_file_bytes:
-            if final_skipped_count_audit > 0:
-                patch_status_placeholder.warning(f"Patching complete with {final_skipped_count_audit} target bytes NOT matching File 2 data. Time: {total_patch_time:.2f}s.")
+            "total_patch_time": total_patch_time, 
+            "total_original_diff_bytes_f2": total_original_diff_bytes_f2,
+            "pass1_audit_mismatch_count": pass1_audit_mismatch_count, # V4.1
+            "successfully_matched_bytes_pass1_audit": successfully_matched_bytes_pass1_audit, # V4.1
+            "total_byte_diff_vs_f3_orig": total_byte_diff_vs_f3_orig
+        }
+        if st.session_state.final_patched_file_bytes: # V4.1
+            if pass1_audit_mismatch_count > 0:
+                patch_status_placeholder.warning(f"Patching complete. Pass 1 Audit: {pass1_audit_mismatch_count} target bytes NOT matching File 2 data. Time: {total_patch_time:.2f}s.")
             elif total_original_diff_bytes_f2 > 0:
-                 patch_status_placeholder.success(f"Patching successfully completed! All {total_original_diff_bytes_f2} target bytes appear correct. Time: {total_patch_time:.2f}s.")
+                 patch_status_placeholder.success(f"Patching successfully completed! Pass 1 Audit: All {total_original_diff_bytes_f2} target bytes appear correct. Time: {total_patch_time:.2f}s.")
             else: patch_status_placeholder.success(f"Patching complete (no differences). File 3 unchanged. Time: {total_patch_time:.2f}s.")
             st.balloons()
         else: patch_status_placeholder.error("Patching process failed or resulted in no data.")
     
-    # After button logic, Streamlit will naturally rerun and update displays based on session_state
-
 st.divider()
-if st.session_state.patched_file_bytes is not None: # This condition now correctly persists
+if st.session_state.final_patched_file_bytes is not None: # V4.1
     st.header("Patching Results")
     summary = st.session_state.last_run_summary
     if summary:
         st.subheader("Run Summary:")
         st.markdown(f"""
-        - Patching Time: **{summary.get('total_patch_time', 0):.2f}s**
-        - Target Bytes (F2): **{summary.get('total_original_diff_bytes_f2', 0)}**
-        - Matched Bytes: **{summary.get('successfully_matched_bytes_audit', 0)}**
-        - Mismatched Bytes (Audit): **<font color='red'>{summary.get('final_skipped_count_audit', 0)}</font>**
-        - Diff vs Orig. F3: **{summary.get('total_byte_diff_vs_f3_orig', 'N/A')}**
-        """, unsafe_allow_html=True)
+        - Patching Process Time: **{summary.get('total_patch_time', 0):.2f}s**
+        - Total Target Bytes from File 2 (in diffs): **{summary.get('total_original_diff_bytes_f2', 0)}**
+        - Bytes Correctly Matching File 2 (after Pass 1): **{summary.get('successfully_matched_bytes_pass1_audit', 0)}**
+        - Mismatched Bytes (Pass 1 Audit): **<font color='red'>{summary.get('pass1_audit_mismatch_count', 0)}</font>**
+        - Overall Byte Difference (Final Patched File vs Original File 3): **{summary.get('total_byte_diff_vs_f3_orig', 'N/A')}**
+        """, unsafe_allow_html=True) # V4.1 Updated summary labels
     col_dl1, col_dl2 = st.columns(2)
     with col_dl1:
         pf_name_default = "patched_file.bin"
         pf_name = f"patched_{st.session_state.file3_name}" if st.session_state.file3_name and st.session_state.file3_name != default_file_name_map["file3_name"] else pf_name_default
-        st.download_button("Download Patched File", st.session_state.patched_file_bytes, pf_name, "application/octet-stream", key="dl_patched_main")
+        st.download_button("Download Patched File (Final)", st.session_state.final_patched_file_bytes, pf_name, "application/octet-stream", key="dl_patched_main_v41") # V4.1
     
-    if st.session_state.byte_level_skips_report or (summary and summary.get('final_skipped_count_audit', 0) == 0 and summary.get('total_original_diff_bytes_f2',0) > 0):
-        log_lines = ["Byte-Level Skip Log\n"]
-        if st.session_state.byte_level_skips_report:
-            log_lines.extend([f"{len(st.session_state.byte_level_skips_report)} individual bytes from F1-F2 diffs\n",
-                              "did not match expected F2 byte in final patched file.\n",
-                              "Offsets are absolute in *final patched file*.\n"])
-        elif summary and summary.get('final_skipped_count_audit', 0) == 0 and summary.get('total_original_diff_bytes_f2',0) > 0:
-            log_lines.append("Audit: All target bytes from F2 diffs appear correct in final file.\n")
-        else: log_lines.append("No byte-level discrepancies or no patches applied with new F2 data.\n")
-        log_lines.append("-" * 40 + "\n\n")
-        sorted_skips = sorted(st.session_state.byte_level_skips_report, key=lambda x: x.get("absolute_offset_in_final", -1))
-        for skip in sorted_skips:
-            actual_str = f"{skip.get('actual_byte_final', -1):02X}" if skip.get('actual_byte_final') is not None else "N/A (OOB)"
-            log_lines.append(f"Patch Ref #: {skip.get('patch_number', 'N/A')}\n"
-                             f"  Offset (Final): 0x{skip.get('absolute_offset_in_final', -1):08X}\n"
-                             f"  Expected (F2): 0x{skip.get('expected_byte_f2', -1):02X}\n"
-                             f"  Actual (Final): {actual_str}\n"
-                             f"  Reason: {skip.get('reason', 'Mismatch')}\n" + "-" * 20 + "\n")
-        skip_log_text = "".join(log_lines)
+    # V4.1: Skip log logic uses pass1_skip_report_data
+    if st.session_state.pass1_skip_report_data or (summary and summary.get('pass1_audit_mismatch_count', 0) == 0 and summary.get('total_original_diff_bytes_f2',0) > 0):
+        log_lines = ["Pass 1 Byte-Level Skip Log\n"] # V4.1 Title change
+        if st.session_state.pass1_skip_report_data:
+            log_lines.extend([f"The following {len(st.session_state.pass1_skip_report_data)} individual bytes from original File1-File2 differences\n",
+                              "did not match the expected File 2 byte in the file state *after Pass 1*.\n", # V4.1 Clarification
+                              "Offsets are absolute based on original File 1 structure.\n"]) # V4.1 Clarification
+        elif summary and summary.get('pass1_audit_mismatch_count', 0) == 0 and summary.get('total_original_diff_bytes_f2',0) > 0:
+            log_lines.append("Pass 1 Audit: All target bytes from File 2 differences appear to be correctly in the file state after Pass 1.\n") # V4.1
+        else: log_lines.append("No byte-level discrepancies found after Pass 1 or no patches involved new data from File 2.\n") # V4.1
+        
+        log_lines.append("-" * 40 + "\n\n") # V4.1: Newline added for formatting
+        sorted_skips = sorted(st.session_state.pass1_skip_report_data, key=lambda x: x.get("absolute_offset_in_final", -1))
+        
+        for skip_info in sorted_skips:
+            patch_ref_num = skip_info.get("patch_number", "N/A")
+            abs_offset = skip_info.get("absolute_offset_in_final", -1)
+            expected_f2_byte = skip_info.get("expected_byte_f2", -1)
+            actual_final_byte = skip_info.get("actual_byte_final", None) 
+            reason = skip_info.get("reason", "Mismatch")
+            actual_str = f"{actual_final_byte:02X}" if actual_final_byte is not None else "N/A (OOB)"
+
+            log_lines.append(f"Reference Original Patch #: {patch_ref_num}\n")
+            log_lines.append(f"  Absolute Offset in Final File: 0x{abs_offset:08X}\n")
+            log_lines.append(f"  Expected Byte (from File 2 diff): 0x{expected_f2_byte:02X}\n")
+            log_lines.append(f"  Actual Byte in File (after Pass 1): {actual_str}\n") # V4.1 Clarification
+            log_lines.append(f"  Reason: {reason}\n")
+            log_lines.append("-" * 20 + "\n")
+        skip_log_text = "".join(log_lines) # Ensures newlines are preserved
+
         with col_dl2:
-            st.download_button("Download Skip Log", skip_log_text, "byte_skip_log.txt", "text/plain", key="dl_skiplog_main")
-        if st.session_state.byte_level_skips_report:
-            st.subheader("Skip Log Preview (Max 20 Mismatches)")
+            st.download_button("Download Pass 1 Skip Log", skip_log_text, "pass1_skip_log.txt", "text/plain", key="dl_skiplog_main_v41") # V4.1
+        
+        if st.session_state.pass1_skip_report_data: # V4.1
+            st.subheader("Pass 1 Skip Log Preview (Max 20 Mismatches)")
+            # ... (preview logic similar to before, using skip_log_text)
+            preview_lines_list = skip_log_text.splitlines()
             header_end_idx = 0
-            for i, line_content in enumerate(log_lines):
+            for i, line_content in enumerate(preview_lines_list):
                 if line_content.strip() == ("-" * 40): header_end_idx = i + 2; break
-            preview_entry_lines = []
-            entry_count, max_preview_entries = 0, 20
-            for i in range(header_end_idx, len(log_lines)):
-                preview_entry_lines.append(log_lines[i])
-                if log_lines[i].strip() == ("-"*20): entry_count +=1
-                if entry_count >= max_preview_entries: break
-            st.text_area("Skip Log Preview", "".join(preview_entry_lines), height=300, key="skiplog_preview_main", disabled=True)
-            if len(sorted_skips) > max_preview_entries: st.caption(f"... and {len(sorted_skips) - max_preview_entries} more (see full log).")
-        elif summary and summary.get('final_skipped_count_audit', 0) == 0 and summary.get('total_original_diff_bytes_f2',0) > 0:
-            st.success("Audit Log: All target bytes appear correct.")
+            
+            preview_display_text_list = []
+            current_entry_count = 0
+            max_preview_entries_display = 20
+            
+            if header_end_idx < len(preview_lines_list): # Ensure header was found
+                preview_display_text_list.extend(preview_lines_list[:header_end_idx]) # Add header
+                
+                for i in range(header_end_idx, len(preview_lines_list)):
+                    preview_display_text_list.append(preview_lines_list[i])
+                    if preview_lines_list[i].strip() == ("-"*20): 
+                        current_entry_count +=1
+                    if current_entry_count >= max_preview_entries_display:
+                        break
+            else: # Fallback if header parsing is tricky
+                preview_display_text_list = preview_lines_list[:(max_preview_entries_display*6)]
+
+
+            st.text_area("Pass 1 Skip Log Preview", "\n".join(preview_display_text_list), height=300, key="skiplog_preview_main_v41", disabled=True)
+            if len(sorted_skips) > max_preview_entries_display: st.caption(f"... and {len(sorted_skips) - max_preview_entries_display} more (see full log).")
+        elif summary and summary.get('pass1_audit_mismatch_count', 0) == 0 and summary.get('total_original_diff_bytes_f2',0) > 0:
+            st.success("Pass 1 Audit Log: All target bytes appear correct after Pass 1.") # V4.1
 
 st.sidebar.header("About")
-st.sidebar.info("Binary File Patcher V4 (Streamlit). Applies differences from File1-File2 to File3.")
+st.sidebar.info("Binary File Patcher V4.1 (Streamlit). Skip log reflects Pass 1 state.") # V4.1
 st.sidebar.markdown("--- \n ### How to Use:\n1. Upload File 1 (Original Ref).\n2. Upload File 2 (Modified Ref).\n3. Upload File 3 (Target to Patch).\n4. Adjust Strictness.\n5. Click 'Apply Differences'.\n6. Review & Download results.")
